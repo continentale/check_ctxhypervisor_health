@@ -1,16 +1,37 @@
 #!/usr/bin/php
 <?php
 
+/*
+ *    check_ctxhypervisor_helath
+ *    
+ *
+ *    Copyright (C) 2010 Andy Goodwin <andyg@unf.net>
+ */
+
 $options = getopt("h:u:p:w::c::", array("host:", "user:", "password:", "warning::", "critical::"));
 
 // no options defined? 
 if(count($options) == 0)
 {
-			
+    echo "parameter -h || --host (Hostname from the Hypervisor) is missing \n";
+    echo "parameter -u || --user is missing \n";
+    echo "parameter -p || --password is missing \n";
 }
 if(!isset($options['host']) && !isset($options['h']))
 {
-	echo "parameter -h || --host (Hostname of the snmp target) is missing \n";
+	echo "parameter -h || --host (Hostname from the Hypervisor) is missing \n";
+	exit(0);
+}
+
+if(!isset($options['user']) && !isset($options['u']))
+{
+	echo "parameter -u || --user is missing \n";
+	exit(0);
+}
+
+if(!isset($options['password']) && !isset($options['p']))
+{
+	echo "parameter -p || --password is missing \n";
 	exit(0);
 }
 
@@ -23,10 +44,12 @@ $critical = isset($options['critical']) ? $options['critical'] : isset($options[
 $context = array();
 $xshost = 'https://' . $xshost;
 
-
+// get all the important data from the Hypervisor
 $context['system'] = getXenserverDetails($xshost, $xsuser, $xspassword, $warning, $critical);
+$exit_code = get_exit_code($context['system']);
 
-print_r($context);
+renderOutput($context['system'], $exit_code);
+
 
 /*
  *    PHP XenAPI v1.0
@@ -177,8 +200,8 @@ function getXenserverDetails($xshost, $login, $password, $warning = 90, $critica
             //Hostname or IP identical?
             if ('https://' . ($record['name_label']) == $xshost || 'https://' . ($record['address'] == $xshost))
             {
-               $details['host']['vendor'] = $record['bios_strings']['system-manufacturer'];
-
+                $details['host']['vendor'] = $record['bios_strings']['system-manufacturer'];
+                $details['host']['name'] = $record['hostname'];
                 $details['host']['model'] = $record['bios_strings']['system-product-name'];
                 $details['host']['sn'] = $record['bios_strings']['system-serial-number'];
                 $details['host']['version'] = $record['software_version']['product_brand'] . ' ' . $record['software_version']['product_version'];
@@ -283,4 +306,15 @@ function array_value_recursive($key, array $arr)
     });
     return count($val) > 1 ? $val : array_pop($val);
 }
-	
+
+/**
+ * Render the Data including performance graphs
+ * @param array $data
+ * @param int $exit_code
+ */
+function renderOutput($data, $exit_code) {
+
+    if ($exit_code == 0)
+    echo "OK: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") is healthy.\n";
+
+}
