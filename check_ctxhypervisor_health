@@ -40,6 +40,7 @@ $xsuser = isset($options['user']) ? $options['user'] : $options['u'];
 $xspassword = isset($options['password']) ? $options['password'] : $options['p'];
 $warning = isset($options['warning']) ? $options['warning'] : isset($options['w']) ? $options['w'] : 90;
 $critical = isset($options['critical']) ? $options['critical'] : isset($options['c']) ? $options['c']: 95;
+$is_poolmaster = false;
 
 $context = array();
 $xshost = 'https://' . $xshost;
@@ -49,6 +50,228 @@ $context['system'] = getXenserverDetails($xshost, $xsuser, $xspassword, $warning
 $exit_code = get_exit_code($context['system']);
 
 renderOutput($context['system'], $exit_code);
+
+
+function getXenserverDetails($xshost, $login, $password, $warning = 90, $critical = 95)
+{
+    $details = array();
+
+
+		$xenserver = new XenApi($xshost, $login = 'root', $password);
+          
+        //get all hosts from the conneted pool. Unfortunately we can only connect to the poolmaster..
+        $hosts = $xenserver->host__get_all();
+
+        $poolguests = $xenserver->VM__get_all();
+
+		foreach ($hosts as $host)
+		{
+		    $record = $xenserver->host__get_record($host);
+
+            //Hostname or IP identical?
+            
+            if (('https://' . $record['name_label']) == $xshost || ('https://' . $record['address']) == $xshost)
+            {
+                $details['host']['name'] = $record['hostname'];
+                $details['host']['vendor'] = $record['bios_strings']['system-manufacturer'];
+                $details['host']['model'] = $record['bios_strings']['system-product-name'];
+                $details['host']['sn'] = $record['bios_strings']['system-serial-number'];
+                $details['host']['version'] = $record['software_version']['product_brand'] . ' ' . $record['software_version']['product_version'];
+                $details['host']['cpu'] = $record['cpu_info']['modelname'] . "(" . $record['cpu_info']['socket_count'] . " Sockets - ". $record['cpu_info']['cpu_count'].  " CPU)";
+                               
+                //PBDs & SR details
+                foreach ($record['PBDs'] as $pbd)
+			    {
+                    $pbd_list = $xenserver->PBD__get_record($pbd);
+                    $sr = $xenserver->SR__get_record($pbd_list['SR']);
+
+                    // ignore udev devices such as dvd rom or usb drives..
+                    if ($sr['type'] != 'udev')
+                    {
+                        $total = round($sr['physical_size'] / 1024 / 1024 / 1024,2);
+                       // size < 1 is probably the xs tools file, we can safely ignore
+                        if ($total < 1)
+                            continue;
+
+                        $used = round($sr['physical_utilisation'] / 1024 / 1024 / 1024,2);
+                        $usage = round($used * 100 / $total, 2);
+
+
+                        $details['storage'][] = array(
+                            'label' => $sr['name_label'],
+                            'type' => $sr['type'],
+                            'total' => $total,
+                            'used' => $used,
+                            'free' => $total - $used,
+                            'usage' => $usage,
+                            'exit_code' => $usage > $critical ? 2 :($usage > $warning ? 1 : 0),
+                        );
+                       
+                    }
+                }
+                
+                //metrics -> Memory usage
+                $metric = $xenserver->host_metrics__get_record($record['metrics']);
+                
+                $memtotal = ceil(round($metric['memory_total'] / 1024 / 1024 / 1024,2, PHP_ROUND_HALF_UP));
+                $memfree = round($metric['memory_free'] / 1024 / 1024 / 1024,2);
+                $memused = $memtotal - $memfree;
+                $usage = round($memused * 100 / $memtotal, 2);
+
+                $details['memory'] = array(
+                    'total' => $memtotal,
+                    'used' => $memused,
+                    'free' => $memtotal - $memused,
+                    'usage' => $usage,
+                    'exit_code' => $usage > $critical ? 2 : ($usage > $warning ? 1 : 0)
+                );
+
+                //VMS
+                foreach ($record['resident_VMs'] as $guests)
+			    {
+				    $rec = $xenserver->VM__get_record($guests);
+				    if ( !$rec['is_control_domain'])
+				    {
+    			        $details['guests'][] = array(
+					        'name' => $rec['name_label'],
+					        'powerstate' => $rec['power_state'],
+					    );
+                    }
+                }
+            }
+        }
+        
+        foreach ($poolguests as $pool_guests)
+        {
+            $rec = $xenserver->VM__get_record($pool_guests);
+            if ($rec['is_a_template'] == '1' || $rec['is_a_snapshot'] == '1' || $rec['power_state'] == 'Running')
+                continue;
+            
+           $details['guests'][] = array(
+               'name' => $rec['name_label'],
+               'powerstate' => $rec['power_state'],
+           );
+        }
+        
+	
+	return $details;
+}
+
+
+/**
+* Determine the exit code of the device, highest value wins..
+*/
+function get_exit_code($context)
+{
+	$codes = array_value_recursive('exit_code',$context);
+
+    if (count($codes) > 1)
+		return max($codes);
+
+	elseif ($codes == 1)
+		return $codes;
+
+	else
+        return 0;
+}
+
+function set_exit_code($array)
+{
+	$codes = array_value_recursive('exit_code', $array);
+	return max($codes);
+}
+/**
+ * Get all values from specific key in a multidimensional array
+ *
+ * @param string $key key(s) of value you wish to extract
+ * @param array  $arr where you want
+ *
+ * @return null|string|array
+ */
+function array_value_recursive($key, array $arr)
+{
+    $val = array();
+    array_walk_recursive($arr, function ($v, $k) use ($key, &$val) {
+        if ($k == $key) array_push($val, $v);
+    });
+    return count($val) > 1 ? $val : array_pop($val);
+}
+
+function formatStatus ($txt, $exit_code = 4)
+{
+	$green = '#66bb6a';
+	$red = '#f0666c';
+	$orange = '#ffe57b';
+	$grey = '#5f6268';
+	$white = '#fff';
+	
+	if ($exit_code == 0)
+		$output =  '<span style="background-color:'. $green . '; color: ' . $white . '; padding: 1px 3px;">'. $txt . '</span>';
+	
+	elseif ($exit_code == 1)
+		$output =  '<span style="background-color:'. $orange . '; color: ' . $grey . '; padding: 1px 3px;">'. $txt . '</span>';
+	
+	elseif ($exit_code == 2)
+		$output =  '<span style="background-color:'. $red . '; color: ' . $white . '; padding: 1px 3px;">'. $txt . '</span>';
+	else
+		$output = $txt;
+
+	return $output;
+}
+
+
+/**
+ * Render the Data including performance graphs
+ * @param array $data
+ * @param int $exit_code
+ */
+function renderOutput($data, $exit_code) {
+
+    global $is_poolmaster;
+
+   if ($exit_code == 0){
+        echo "OK: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") is healthy.\n";
+    }
+
+    elseif ($exit_code == 1){
+        echo "WARNING: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") reported problems. please check details...\n";
+    }
+     
+    elseif ($exit_code == 2){
+        echo "CRITICAL: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") reported problems. please check details...\n";
+    }
+
+    echo "Hypervisor Version: " . $data['host']['version'] . "\n";
+    echo "Poolmaster: " . ($is_poolmaster == true ? "Master" : "Slave") . "\n";
+    echo "Vendor: " . $data['host']['vendor'] . "\n";
+    echo "Model: " . $data['host']['model'] . "\n";
+    echo "SN: " . $data['host']['sn'] . "\n";
+    echo "CPU: " . $data['host']['cpu'] . "\n\n";
+
+    // CPU usage
+    echo "Memory Usage: " . formatStatus($data['memory']['usage'] .  "%", $data['memory']['exit_code']) . " (Free: " . $data['memory']['free'] . " GB - Used: " . $data['memory']['used'] . " GB - Total: ". $data['memory']['total'] . " GB)\n";
+
+
+    foreach ($data['storage'] as $storage)
+    {
+        echo $storage['label'] . " - Usage: " . formatStatus($storage['usage'] . "%", $storage['exit_code']) . " (Free: " . $storage['free'] . " GB - Used: " . $storage['used'] . " GB - Total: " .$storage['total'] . " GB)\n";
+    }
+
+    echo "\n<b>Guests running on this host:</b>\n";
+    if (!empty($data['guests'] ))
+    {
+        foreach ($data['guests'] as $guest)
+        {
+            if ($guest['powerstate'] == 'Running')
+                echo '<span style="color: #66bb6a;">&#9679;</span> ' .  $guest['name'] . "\n";
+        
+            if ($guest['powerstate'] != 'Running' &&  $is_poolmaster == true)
+                echo '<span style="color: #f0666c;">&#9679;</span> ' .  $guest['name'] . "\n";
+        }
+    }
+    
+}
+
 
 /*
  *    PHP XenAPI v1.0
@@ -80,6 +303,7 @@ renderOutput($context['system'], $exit_code);
  *
  */
 class XenApi {
+    
     private $_url;
 
     private $_session_id;
@@ -87,6 +311,9 @@ class XenApi {
     private $_password;
 
     function __construct ($url, $user, $password) {
+
+        global $is_poolmaster;
+
         $r = $this->xenrpc_request($url, $this->xenrpc_method('session.login_with_password', array($user, $password, '1.3')));
 
         if (is_array($r) && $r['Status'] == 'Success') 
@@ -95,6 +322,7 @@ class XenApi {
             $this->_url = $url;
             $this->_user = $user;
             $this->_password = $password;
+            $is_poolmaster = true;
         } else 
 		{
 			if ($r['ErrorDescription'][0] == 'HOST_IS_SLAVE')
@@ -180,158 +408,4 @@ class XenApi {
 
         return $ret;
         }
-}
-
-function getXenserverDetails($xshost, $login, $password, $warning = 90, $critical = 95)
-{
-    $details = array();
-
-
-		$xenserver = new XenApi($xshost, $login = 'root', $password);
-          
-        //get all hosts from the conneted pool. Unfortunately we can only connect to the poolmaster..
-        $hosts = $xenserver->host__get_all();
-
-		foreach ($hosts as $host)
-		{
-		    $record = $xenserver->host__get_record($host);
-
-            //Hostname or IP identical?
-            if ('https://' . ($record['name_label']) == $xshost || 'https://' . ($record['address'] == $xshost))
-            {
-                $details['host']['name'] = $record['hostname'];
-                $details['host']['vendor'] = $record['bios_strings']['system-manufacturer'];
-                $details['host']['model'] = $record['bios_strings']['system-product-name'];
-                $details['host']['sn'] = $record['bios_strings']['system-serial-number'];
-                $details['host']['version'] = $record['software_version']['product_brand'] . ' ' . $record['software_version']['product_version'];
-                $details['host']['cpu'] = $record['cpu_info']['modelname'] . "(" . $record['cpu_info']['socket_count'] . " Sockets - ". $record['cpu_info']['cpu_count'].  " CPU)";
-                         
-                //PBDs & SR details
-                foreach ($record['PBDs'] as $pbd)
-			    {
-                    $pbd_list = $xenserver->PBD__get_record($pbd);
-                    $sr = $xenserver->SR__get_record($pbd_list['SR']);
-
-                    // check only local storage
-                    if ($sr['type'] == 'ext' || $sr['type'] == 'lvm')
-                    {
-                        $total = round($sr['physical_size'] / 1024 / 1024 / 1024,2);
-                        $used = round($sr['physical_utilisation'] / 1024 / 1024 / 1024,2);
-                        $usage = round($used * 100 / $total, 2);
-
-                        $details['storage'][] = array(
-                            'label' => $sr['name_label'],
-                            'total' => $total,
-                            'used' => $used,
-                            'free' => $total - $used,
-                            'usage' => $usage,
-                            'exit_code' => $usage > $critical ? 2 :($usage > $warning ? 1 : 0),
-                        );
-                       
-                    }
-                }
-
-                //metrics -> Memory usage
-                $metric = $xenserver->host_metrics__get_record($record['metrics']);
-                
-                $memtotal = ceil(round($metric['memory_total'] / 1024 / 1024 / 1024,2, PHP_ROUND_HALF_UP));
-                $memfree = round($metric['memory_free'] / 1024 / 1024 / 1024,2);
-                $memused = $memtotal - $memfree;
-                $usage = round($memused * 100 / $memtotal, 2);
-
-                $details['memory'] = array(
-                    'total' => $memtotal,
-                    'used' => $memused,
-                    'free' => $memtotal - $memused,
-                    'usage' => $usage,
-                    'exit_code' => $usage > $critical ? 2 : ($usage > $warning ? 1 : 0)
-                );
-
-                //VMS
-                foreach ($record['resident_VMs'] as $guests)
-			    {
-				    $rec = $xenserver->VM__get_record($guests);
-				    if ( !$rec['is_control_domain'])
-				    {
-                         if (('https://'. $record['name_label']) == $xshost)
-					        $details['guests'][] = array(
-						        'guest_name' => $rec['name_label'],
-						        'power_state' => $rec['power_state'],
-					    );
-                    }
-                }
-            }
-        }
-	
-	return $details;
-}
-
-
-/**
-* Determine the exit code of the device, highest value wins..
-*/
-function get_exit_code($context)
-{
-	$codes = array_value_recursive('exit_code',$context);
-
-    if (count($codes) > 1)
-		return max($codes);
-
-	elseif ($codes == 1)
-		return $codes;
-
-	else
-        return 0;
-}
-
-function set_exit_code($array)
-{
-	$codes = array_value_recursive('exit_code', $array);
-	return max($codes);
-}
-/**
- * Get all values from specific key in a multidimensional array
- *
- * @param string $key key(s) of value you wish to extract
- * @param array  $arr where you want
- *
- * @return null|string|array
- */
-function array_value_recursive($key, array $arr)
-{
-    $val = array();
-    array_walk_recursive($arr, function ($v, $k) use ($key, &$val) {
-        if ($k == $key) array_push($val, $v);
-    });
-    return count($val) > 1 ? $val : array_pop($val);
-}
-
-/**
- * Render the Data including performance graphs
- * @param array $data
- * @param int $exit_code
- */
-function renderOutput($data, $exit_code) {
-
-    if ($exit_code == 0){
-        echo "OK: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") is healthy.\n";
-    }
-
-    elseif ($exit_code == 1){
-        echo "WARNING: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") reported problems. please check details...\n";
-    }
-     
-    elseif ($exit_code == 2){
-        echo "CRITICAL: Hypevisor " . $data['host']['name'] . "(" . $data['host']['vendor'] . " - ". $data['host']['model'] . " - SN:" . $data['host']['sn'] . ") reported problems. please check details...\n";
-    }
-
-    echo "Hypervisor Version: " . $data['host']['version'] . "\n";
-    echo "Vendor: " . $data['host']['vendor'] . "\n";
-    echo "Model: " . $data['host']['model'] . "\n";
-    echo "SN: " . $data['host']['sn'] . "\n";
-    echo "CPU: " . $data['host']['cpu'] . "\n\n";
-
-    echo "Memory Usage: " . $data['memory']['usage'] .  "% (Free: " . $data['memory']['free'] . "GB - Used: " . $data['memory']['used'] . "GB - Total: ". $data['memory']['total'] . "GB)\n";
-
-    // foreach ($data[])
 }
