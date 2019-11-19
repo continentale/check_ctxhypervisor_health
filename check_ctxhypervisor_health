@@ -248,7 +248,11 @@ function renderOutput($data, $params, $exit_code) {
 
     foreach ($data['storage'] as $storage)
     {
-        echo $storage['label'] . " - Usage: " . formatStatus($storage['usage'] . "%", $storage['exit_code']) . " (Free: " . $storage['free'] . " GB - Used: " . $storage['used'] . " GB - Total: " .$storage['total'] . " GB)\n";
+        // local storage
+        if ($storage['type'] == 'ext' || $storage['type'] == 'lvm')
+            echo $storage['label'] . " - Usage: " . formatStatus($storage['usage'] . "%", $storage['exit_code']) . " (Free: " . $storage['free'] . " GB - Used: " . $storage['used'] . " GB - Total: " .$storage['total'] . " GB)\n";
+        elseif ($data['is_poolmaster'] == true)
+            echo $storage['label'] . " - Usage: " . formatStatus($storage['usage'] . "%", $storage['exit_code']) . " (Free: " . $storage['free'] . " GB - Used: " . $storage['used'] . " GB - Total: " .$storage['total'] . " GB)\n";
     }
 
     // VMs
@@ -271,10 +275,14 @@ function renderOutput($data, $params, $exit_code) {
 
     foreach ($data['storage'] as $storage)
     {
+        
+
         $w = round($storage['total'] * $params['warning'] / 100, 2);
         $c = round($storage['total'] * $params['critical'] / 100, 2);
-
-        echo ' \'' . $storage['label'] . '\'=' . $storage['used'] . ';'. $w . ';' . $c .';0;' . $storage['total']. "\n";
+        if ($storage['type'] == 'ext' || $storage['type'] == 'lvm')
+            echo ' \'' . $storage['label'] . '\'=' . $storage['used'] . ';'. $w . ';' . $c .';0;' . $storage['total']. "\n";
+        elseif ($data['is_poolmaster'] == true)
+            echo ' \'' . $storage['label'] . '\'=' . $storage['used'] . ';'. $w . ';' . $c .';0;' . $storage['total']. "\n";
     }
 
 
