@@ -9,7 +9,7 @@ check_ctxhypervisor_health checks the health of a Citrix Hypervisor (and Xenserv
 
 ./check_ctxhypervisor_health -h=192.168.1.20 -u=root -p=rootpwd -w=95 -c=99
 
-##ä Parameters
+### Parameters
 * -h ip or hostname 
 * -u username, typically root
 * -p password from the user
